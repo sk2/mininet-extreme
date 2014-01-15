@@ -31,13 +31,15 @@
 void usage(char *name) 
 {
     printf("Execution utility for Mininet\n\n"
-           "Usage: %s [-cdnp] [-a pid] [-g group] [-r rtprio] cmd args...\n\n"
+           "Usage: %s [-cdnpz] [-a pid] [-b pid] [-g group] [-r rtprio] cmd args...\n\n"
            "Options:\n"
            "  -c: close all file descriptors except stdin/out/error\n"
            "  -d: detach from tty by calling setsid()\n"
            "  -n: run in new network namespace\n"
+           "  -z: run in new mount namespace\n"
            "  -p: print ^A + pid\n"
            "  -a pid: attach to pid's network namespace\n"
+           "  -b pid: attach to pid's mount namespace\n"
            "  -g group: add to cgroup\n"
            "  -r rtprio: run with SCHED_RR (usually requires -g)\n"
            "  -v: print version\n",
@@ -91,15 +93,29 @@ void cgroup(char *gname)
     }
 }
 
+/* Attach to the specified namespace FD path */
+int attachToNS(char *path)
+{
+    int nsid;
+    nsid = open(path, O_RDONLY);
+    if (nsid < 0) {
+        perror(path);
+        return 1;
+    }
+    if (setns(nsid, 0) != 0) {
+        perror("setns");
+        return 1;
+    }
+}
+
 int main(int argc, char *argv[])
 {
     int c;
     int fd;
     char path[PATH_MAX];
-    int nsid;
     int pid;
     static struct sched_param sp;
-    while ((c = getopt(argc, argv, "+cdnpa:g:r:vh")) != -1)
+    while ((c = getopt(argc, argv, "+cdnzpa:b:g:r:vh")) != -1)
         switch(c) {
         case 'c':
             /* close file descriptors except stdin/out/error */
@@ -128,6 +144,13 @@ int main(int argc, char *argv[])
                 return 1;
             }
             break;
+        case 'z':
+            /* run in mount namespace */
+            if (unshare(CLONE_NEWNS) == -1) {
+                perror("unshare");
+                return 1;
+            }
+            break;
         case 'p':
             /* print pid */
             printf("\001%d\n", getpid());
@@ -137,15 +160,17 @@ int main(int argc, char *argv[])
             /* Attach to pid's network namespace */
             pid = atoi(optarg);
             sprintf(path, "/proc/%d/ns/net", pid );
-            nsid = open(path, O_RDONLY);
-            if (nsid < 0) {
-                perror(path);
-                return 1;
-            }
-            if (setns(nsid, 0) != 0) {
-                perror("setns");
-                return 1;
-            }
+            if (attachToNS(path) != 0) {
+				return 1;
+			}
+            break;
+        case 'b':
+            /* Attach to pid's mount namespace */
+            pid = atoi(optarg);
+            sprintf(path, "/proc/%d/ns/mnt", pid );
+            if (attachToNS(path) != 0) {
+				return 1;
+			}
             break;
         case 'g':
             /* Attach to cgroup */

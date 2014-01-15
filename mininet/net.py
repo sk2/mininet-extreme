@@ -95,7 +95,7 @@ from itertools import chain
 
 from mininet.cli import CLI
 from mininet.log import info, error, debug, output
-from mininet.node import Host, OVSKernelSwitch, Controller
+from mininet.node import Host, OVSKernelSwitch, HostInterface, LegacySwitch, QuaggaRouter, TransitPortalRouter, Controller
 from mininet.link import Link, Intf
 from mininet.util import quietRun, fixLimits, numCores, ensureRoot
 from mininet.util import macColonHex, ipStr, ipParse, netParse, ipAdd
@@ -107,12 +107,15 @@ VERSION = "2.1.0"
 class Mininet( object ):
     "Network emulation with hosts spawned in network namespaces."
 
-    def __init__( self, topo=None, switch=OVSKernelSwitch, host=Host,
-                  controller=Controller, link=Link, intf=Intf,
+    def __init__( self, topo=None, switch=OVSKernelSwitch,
+                  legacySwitch=LegacySwitch, hostInterface=HostInterface,
+                  legacyRouter=QuaggaRouter,
+                  transitPortalRouter=TransitPortalRouter,
+                  host=Host, controller=Controller, link=Link, intf=Intf,
                   build=True, xterms=False, cleanup=False, ipBase='10.0.0.0/8',
                   inNamespace=False,
                   autoSetMacs=False, autoStaticArp=False, autoPinCpus=False,
-                  listenPort=None ):
+                  listenPort=None, bridgeNum=0, defaultHostInterfaceBind='eth0'):
         """Create Mininet object.
            topo: Topo (topology) object or None
            switch: default Switch class
@@ -132,6 +135,10 @@ class Mininet( object ):
                each additional switch in the net if inNamespace=False"""
         self.topo = topo
         self.switch = switch
+        self.legacySwitch = legacySwitch
+        self.hostInterface = hostInterface
+        self.legacyRouter = legacyRouter
+        self.transitPortalRouter = transitPortalRouter
         self.host = host
         self.controller = controller
         self.link = link
@@ -148,12 +155,20 @@ class Mininet( object ):
         self.numCores = numCores()
         self.nextCore = 0  # next core for pinning hosts to CPUs
         self.listenPort = listenPort
+        self.bridgeNum = bridgeNum
+        self.defaultHostInterfaceBind = defaultHostInterfaceBind
 
         self.hosts = []
         self.switches = []
+        self.legacySwitches = []
+        self.hostInterfaces = []
+        self.legacyRouters = []
+        self.transitPortalRouters = []
         self.controllers = []
 
-        self.nameToNode = {}  # name to Node (Host/Switch) objects
+        self.nameToNode = {}  # name to Node (Host/Switch/hostInterface/legacy(Router,Switch)) objects
+        self.physicalAdaptersBridged = [] # physical adapters connected to a (any) bridge
+        self.bridgeInterfaces = [] # instantiated bridges
 
         self.terms = []  # list of spawned xterm processes
 
@@ -206,6 +221,117 @@ class Mininet( object ):
         self.nameToNode[ name ] = sw
         return sw
 
+    def addLegacySwitch( self, name, cls=None, **params ):
+#    TODO: BSCHLINKER - Consider reducing redundancy between legacySwitch and hostInterface
+        """Add legacy switch.
+           name: name of legacy switch to add
+           cls: custom host interface class/constructor (optional)
+           returns: added legacy switch ."""
+        defaults = { 'bridgeNum': self.bridgeNum }
+        defaults.update( params )
+
+        """Store the number for our next bridge based on the current bridge #
+           Yes, this may 'artificially inflate' bridge numbers, but who cares?
+           It has zero impact and is our safest option at the moment"""
+        self.bridgeNum = defaults['bridgeNum'] + 1
+
+        "Verify another component isn't already using this br #"
+        if defaults['bridgeNum'] in self.bridgeInterfaces:
+            raise Exception( 'Another component is already using br'
+                             + str(defaults['bridgeNum']) )
+        self.bridgeInterfaces.append(defaults['bridgeNum'])
+
+        if not cls:
+            cls = self.legacySwitch
+        hi = cls( name, **defaults )
+        self.legacySwitches.append( hi )
+        self.nameToNode[ name ] = hi
+        return hi
+
+
+    def addHostInterface( self, name, cls=None, **params ):
+        """Add host interface.
+           name: name of host interface to add
+           cls: custom host interface class/constructor (optional)
+           returns: added host interface ."""
+        defaults = { 'bridgeToPhys': self.defaultHostInterfaceBind,
+                     'bridgeNum': self.bridgeNum }
+        defaults.update( params )
+
+        """Store the number for our next bridge based on the current bridge #
+           Yes, this may 'artificially inflate' bridge numbers, but who cares?
+           It has zero impact and is our safest option at the moment"""
+        self.bridgeNum = int(defaults['bridgeNum']) + 1
+
+        "Verify another component isn't already using this br #"
+        if defaults['bridgeNum'] in self.bridgeInterfaces:
+            raise Exception( 'Another component is already using br'
+                             + str(defaults['bridgeNum']) )
+        self.bridgeInterfaces.append(defaults['bridgeNum'])
+
+        "Verify another host interface isn't already bound to this interface"
+        if defaults['bridgeToPhys'] in self.physicalAdaptersBridged:
+            raise Exception( 'Cannot bridge two host interfaces to the '
+                         'same physical interface' )
+        self.physicalAdaptersBridged.append(defaults['bridgeToPhys'])
+
+        if not cls:
+            cls = self.hostInterface
+        hi = cls( name, **defaults )
+        self.hostInterfaces.append( hi )
+        self.nameToNode[ name ] = hi
+        return hi
+
+    def addLegacyRouter( self, name, cls=None, **params ):
+        """Add router.
+           name: name of router to add
+           cls: custom router class/constructor (optional)
+           returns: added legacy router ."""
+
+        # Default IP and MAC addresses
+        defaults = { 'ip': ipAdd( self.nextIP,
+                                  ipBaseNum=self.ipBaseNum,
+                                  prefixLen=self.prefixLen ) +
+                                  '/%s' % self.prefixLen }
+        if self.autoSetMacs:
+            defaults[ 'mac'] = macColonHex( self.nextIP )
+        if self.autoPinCpus:
+            defaults[ 'cores' ] = self.nextCore
+            self.nextCore = ( self.nextCore + 1 ) % self.numCores
+        self.nextIP += 1
+        defaults.update( params )
+        if not cls:
+            cls = self.legacyRouter
+        lr = cls( name, **defaults )
+        self.legacyRouters.append( lr )
+        self.nameToNode[ name ] = lr
+        return lr
+
+    def addTransitPortalRouter( self, name, cls=None, **params ):
+        """Add transit portal router.
+           name: name of transit portal router to add
+           cls: custom router class/constructor (optional)
+           returns: added transit portal router ."""
+
+        # Default IP and MAC addresses
+        defaults = { 'ip': ipAdd( self.nextIP,
+                                  ipBaseNum=self.ipBaseNum,
+                                  prefixLen=self.prefixLen ) +
+                                  '/%s' % self.prefixLen }
+        if self.autoSetMacs:
+            defaults[ 'mac'] = macColonHex( self.nextIP )
+        if self.autoPinCpus:
+            defaults[ 'cores' ] = self.nextCore
+            self.nextCore = ( self.nextCore + 1 ) % self.numCores
+        self.nextIP += 1
+        defaults.update( params )
+        if not cls:
+            cls = self.transitPortalRouter
+        tpr = cls( name, **defaults )
+        self.transitPortalRouters.append( tpr )
+        self.nameToNode[ name ] = tpr
+        return tpr
+
     def addController( self, name='c0', controller=None, **params ):
         """Add controller.
            controller: Controller class"""
@@ -246,12 +372,16 @@ class Mininet( object ):
 
     def __iter__( self ):
         "return iterator over node names"
-        for node in chain( self.hosts, self.switches, self.controllers ):
+        for node in chain( self.hosts, self.switches, self.legacySwitches,
+                           self.hostInterfaces, self.legacyRouters,
+                           self.transitPortalRouters, self.controllers ):
             yield node.name
 
     def __len__( self ):
         "returns number of nodes in net"
         return ( len( self.hosts ) + len( self.switches ) +
+                 len( self.legacySwitches) + len( self.hostInterfaces) +
+                 len( self.legacyRouters) + len( self.transitPortalRouters ) +
                  len( self.controllers ) )
 
     def __contains__( self, item ):
@@ -305,6 +435,26 @@ class Mininet( object ):
             host.cmd( 'ifconfig lo up' )
         info( '\n' )
 
+    def configLegacyRouters( self ):
+        "Configure a set of legacy routers."
+        routers = self.legacyRouters + self.transitPortalRouters
+        for router in routers:
+            info( router.name + ' ' )
+            intf = router.defaultIntf()
+            if intf:
+                router.configDefault()
+            else:
+                # Don't configure nonexistent intf
+                router.configDefault( ip=None, mac=None )
+            # You're low priority, dude!
+            # BL: do we want to do this here or not?
+            # May not make sense if we have CPU lmiting...
+            # quietRun( 'renice +18 -p ' + repr( host.pid ) )
+            # This may not be the right place to do this, but
+            # it needs to be done somewhere.
+            router.cmd( 'ifconfig lo up' )
+        info( '\n' )
+
     def buildFromTopo( self, topo=None ):
         """Build mininet from a topology object
            At the end of this function, everything should be connected
@@ -336,6 +486,27 @@ class Mininet( object ):
             self.addSwitch( switchName, **topo.nodeInfo( switchName) )
             info( switchName + ' ' )
 
+        info( '\n*** Adding legacy switches:\n' )
+        for switchName in topo.legacySwitches():
+            self.addLegacySwitch( switchName, **topo.nodeInfo( switchName) )
+            info( switchName + ' ' )
+
+        info( '\n*** Adding host interfaces:\n' )
+        for hostInterface in topo.hostInterfaces():
+            self.addHostInterface( hostInterface, **topo.nodeInfo( hostInterface ) )
+            info( hostInterface + ' [' +
+                  topo.nodeInfo( hostInterface )['bridgeToPhys'] + '] ' )
+
+        info( '\n*** Adding legacy routers:\n' )
+        for routerName in topo.legacyRouters():
+            self.addLegacyRouter( routerName, **topo.nodeInfo( routerName) )
+            info( routerName + ' ' )
+
+        info( '\n*** Adding Transit Portal routers:\n' )
+        for routerName in topo.transitPortalRouters():
+            self.addTransitPortalRouter( routerName, **topo.nodeInfo( routerName) )
+            info( routerName + ' ' )
+
         info( '\n*** Adding links:\n' )
         for srcName, dstName in topo.links(sort=True):
             src, dst = self.nameToNode[ srcName ], self.nameToNode[ dstName ]
@@ -359,6 +530,8 @@ class Mininet( object ):
             self.configureControlNetwork()
         info( '*** Configuring hosts\n' )
         self.configHosts()
+        info( '*** Configuring legacy routers (including Transit Portal)\n' )
+        self.configLegacyRouters()
         if self.xterms:
             self.startTerms()
         if self.autoStaticArp:
@@ -401,12 +574,54 @@ class Mininet( object ):
             info( switch.name + ' ')
             switch.start( self.controllers )
         info( '\n' )
+        info( '*** Starting %s legacy switches\n' % len( self.legacySwitches) )
+        for legacySwitch in self.legacySwitches:
+            info( legacySwitch.name + ' ')
+            legacySwitch.start()
+        info( '\n' )
+        info( '*** Starting %s host interfaces\n' % len( self.hostInterfaces ) )
+        for hostInterface in self.hostInterfaces:
+            info( hostInterface.name + ' ')
+            hostInterface.start()
+        info( '\n' )
+        info( '*** Starting %s legacy routers\n' % len( self.legacyRouters ) )
+        for legacyRouter in self.legacyRouters:
+            info( legacyRouter.name + ' ')
+            legacyRouter.start()
+        info( '\n' )
+        info( '*** Starting %s Transit Portal routers\n'
+              % len( self.transitPortalRouters ) )
+        for transitPortalRouter in self.transitPortalRouters:
+            info( transitPortalRouter.name + ' ')
+            transitPortalRouter.start()
+        info( '\n' )
 
     def stop( self ):
         "Stop the controller(s), switches and hosts"
         if self.terms:
             info( '*** Stopping %i terms\n' % len( self.terms ) )
             self.stopXterms()
+        info( '*** Stopping %i Transit Portal routers\n'
+              % len( self.transitPortalRouters ) )
+        for transitPortalRouter in self.transitPortalRouters:
+            info( transitPortalRouter.name + ' ' )
+            transitPortalRouter.stop()
+        info( '\n' )
+        info( '*** Stopping %i legacy routers\n' % len( self.legacyRouters ) )
+        for legacyRouter in self.legacyRouters:
+            info( legacyRouter.name + ' ' )
+            legacyRouter.stop()
+        info( '\n' )
+        info( '*** Stopping %i host interfaces\n' % len( self.hostInterfaces ) )
+        for hostInterface in self.hostInterfaces:
+            info( hostInterface.name + ' ' )
+            hostInterface.stop()
+        info( '\n' )
+        info( '*** Stopping %i legacy switches\n' % len( self.hostInterfaces ) )
+        for legacySwitch in self.legacySwitches:
+            info( legacySwitch.name + ' ' )
+            legacySwitch.stop()
+        info( '\n' )
         info( '*** Stopping %i switches\n' % len( self.switches ) )
         for switch in self.switches:
             info( switch.name + ' ' )

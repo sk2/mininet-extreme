@@ -1,6 +1,6 @@
 "Module dependency utility functions for Mininet."
 
-from mininet.util import quietRun
+from mininet.util import quietRun, errRun
 from mininet.log import info, error, debug
 from os import environ
 
@@ -65,4 +65,14 @@ def pathCheck( *args, **kwargs ):
             error( 'Cannot find required executable %s.\n' % arg +
                    'Please make sure that %s is installed ' % moduleName +
                    'and available in your $PATH:\n(%s)\n' % environ[ 'PATH' ] )
+            exit( 1 )
+
+def serviceCheck( *args, **kwargs ):
+    "Make sure each service in *args can be found in /etc/init.d/."
+    moduleName = kwargs.get( 'moduleName', 'it' )
+    for arg in args:
+        _, _, ret = errRun( 'test -x /etc/init.d/' + arg )
+        if ret != 0:
+            error( 'Cannot find required service %s in /etc/init.d/.\n' % arg +
+                   'Please make sure that %s is installed ' % moduleName )
             exit( 1 )

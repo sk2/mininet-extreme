@@ -48,17 +48,26 @@ class MultiGraph( object ):
 class Topo(object):
     "Data center network representation for structured multi-trees."
 
-    def __init__(self, hopts=None, sopts=None, lopts=None):
+    def __init__(self, hopts=None, sopts=None, lopts=None, lropts=None,
+                 lsopts=None, tpropts=None, hiopts=None):
         """Topo object:
-           hinfo: default host options
-           sopts: default switch options
-           lopts: default link options"""
+           hinfo:   default host options
+           sopts:   default switch options
+           lopts:   default link options
+           lropts:  default legacy router options
+           lsopts:  default legacy switch options
+           tpropts: default transit portal router options
+           hiopts:  default host interface options"""
         self.g = MultiGraph()
         self.node_info = {}
         self.link_info = {}  # (src, dst) tuples hash to EdgeInfo objects
         self.hopts = {} if hopts is None else hopts
         self.sopts = {} if sopts is None else sopts
         self.lopts = {} if lopts is None else lopts
+        self.lropts = {} if lropts is None else lropts
+        self.lsopts = {} if lsopts is None else lsopts
+        self.tpropts = {} if tpropts is None else tpropts
+        self.hiopts = {} if hiopts is None else hiopts
         self.ports = {}  # ports[src][dst] is port on src that connects to dst
 
     def addNode(self, name, **opts):
@@ -77,7 +86,7 @@ class Topo(object):
            returns: host name"""
         if not opts and self.hopts:
             opts = self.hopts
-        return self.addNode(name, **opts)
+        return self.addNode(name, isHost=True, **opts)
 
     def addSwitch(self, name, **opts):
         """Convenience method: Add switch to graph.
@@ -87,6 +96,46 @@ class Topo(object):
         if not opts and self.sopts:
             opts = self.sopts
         result = self.addNode(name, isSwitch=True, **opts)
+        return result
+
+    def addLegacySwitch(self, name, **opts):
+        """Convenience method: Add legacy switch (bridge) to graph.
+           name: legacy switch name
+           opts: legacy switch options
+           returns: legacy switch name"""
+        if not opts and self.lsopts:
+            opts = self.lsopts
+        result = self.addNode(name, isLegacySwitch=True, **opts)
+        return result
+
+    def addHostInterface(self, name, **opts):
+        """Convenience method: Add host interface (bridge) to graph.
+           name: host interface name
+           opts: host interface options (physical interface to bridge to)
+           returns: host interface name"""
+        if not opts and self.hiopts:
+            opts = self.hiopts
+        result = self.addNode(name, isHostInterface=True, **opts)
+        return result
+
+    def addLegacyRouter(self, name, **opts):
+        """Convenience method: Add legacy router to graph.
+           name: legacy router name
+           opts: legacy router options
+           returns: legacy router name"""
+        if not opts and self.lropts:
+            opts = self.lropts
+        result = self.addNode(name, isLegacyRouter=True, **opts)
+        return result
+
+    def addTransitPortalRouter(self, name, **opts):
+        """Convenience method: Add Transit Portal router / endpoint to graph.
+           name: TP router name
+           opts: TP router options
+           returns: TP router name"""
+        if not opts and self.tpropts:
+            opts = self.tpropts
+        result = self.addNode(name, isTransitPortalRouter=True, **opts)
         return result
 
     def addLink(self, node1, node2, port1=None, port2=None,
@@ -127,10 +176,35 @@ class Topo(object):
         else:
             return self.g.nodes()
 
+    def isHost(self, n):
+        '''Returns true if node is a host.'''
+        info = self.node_info[n]
+        return info and info.get('isHost', False)
+
     def isSwitch(self, n):
         '''Returns true if node is a switch.'''
         info = self.node_info[n]
         return info and info.get('isSwitch', False)
+
+    def isLegacySwitch(self, n):
+        '''Returns true if node is a legacy switch.'''
+        info = self.node_info[n]
+        return info and info.get('isLegacySwitch', False)
+
+    def isLegacyRouter(self, n):
+        '''Returns true if node is a legacy router.'''
+        info = self.node_info[n]
+        return info and info.get('isLegacyRouter', False)
+
+    def isTransitPortalRouter(self, n):
+        '''Returns true if node is a Transit Portal router.'''
+        info = self.node_info[n]
+        return info and info.get('isTransitPortalRouter', False)
+
+    def isHostInterface(self, n):
+        '''Returns true if node is a host interface.'''
+        info = self.node_info[n]
+        return info and info.get('isHostInterface', False)
 
     def switches(self, sort=True):
         '''Return switches.
@@ -139,12 +213,40 @@ class Topo(object):
         '''
         return [n for n in self.nodes(sort) if self.isSwitch(n)]
 
+    def legacySwitches(self, sort=True):
+        '''Return legacy switches.
+        sort: sort legacy switches alphabetically
+        @return legacySwitches list of legacy switches
+        '''
+        return [n for n in self.nodes(sort) if self.isLegacySwitch(n)]
+
+    def legacyRouters(self, sort=True):
+        '''Return legacy routers.
+        sort: sort legacy routers alphabetically
+        @return legacyRouters list of legacy routers
+        '''
+        return [n for n in self.nodes(sort) if self.isLegacyRouter(n)]
+
+    def transitPortalRouters(self, sort=True):
+        '''Return legacy routers.
+        sort: sort transit portal routers alphabetically
+        @return tpRouters list of transit portal routers
+        '''
+        return [n for n in self.nodes(sort) if self.isTransitPortalRouter(n)]
+
+    def hostInterfaces(self, sort=True):
+        '''Return host interfaces.
+        sort: sort host interfaces alphabetically
+        @return interfaces list of host interfaces
+        '''
+        return [n for n in self.nodes(sort) if self.isHostInterface(n)]
+
     def hosts(self, sort=True):
         '''Return hosts.
         sort: sort hosts alphabetically
-        @return dpids list of dpids
+        @return hosts list of hosts
         '''
-        return [n for n in self.nodes(sort) if not self.isSwitch(n)]
+        return [n for n in self.nodes(sort) if self.isHost(n)]
 
     def links(self, sort=True):
         '''Return links.

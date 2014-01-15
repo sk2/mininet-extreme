@@ -48,15 +48,24 @@ import os
 import re
 import signal
 import select
+import tempfile
+import shutil
 from subprocess import Popen, PIPE, STDOUT
 from operator import or_
 from time import sleep
+from collections import namedtuple
 
 from mininet.log import info, error, warn, debug
 from mininet.util import ( quietRun, errRun, errFail, moveIntf, isShellBuiltin,
-                           numCores, retry, mountCgroups )
-from mininet.moduledeps import moduleDeps, pathCheck, OVS_KMOD, OF_KMOD, TUN
+                           numCores, retry, mountCgroups, checkIsDir,
+                           checkAndBindDirectories, copyTreeToExistingDir,
+						   deleteDirectoryIfExists )
+from mininet.moduledeps import moduleDeps, pathCheck, serviceCheck, OVS_KMOD, OF_KMOD, TUN
 from mininet.link import Link, Intf, TCIntf
+
+"Structure containing namespace mounts and required permissions per mount"
+MountProperties = namedtuple("MountProperties",
+                             "pathToBind pathBindTo username groupname mode")
 
 class Node( object ):
     """A virtual network node is simply a shell in a network namespace.
@@ -64,9 +73,11 @@ class Node( object ):
 
     portBase = 0  # Nodes always start with eth0/port0, even in OF 1.0
 
-    def __init__( self, name, inNamespace=True, **params ):
+    def __init__( self, name, inNamespace=True,
+                  privateMounts=False, **params ):
         """name: name of node
            inNamespace: in network namespace?
+           privateMounts: has private mountspace?
            params: Node parameters (see config() for details)"""
 
         # Make sure class actually works
@@ -74,6 +85,7 @@ class Node( object ):
 
         self.name = name
         self.inNamespace = inNamespace
+        self.privateMounts = privateMounts
 
         # Stash configuration parameters for future reference
         self.params = params
@@ -119,6 +131,8 @@ class Node( object ):
         opts = '-cdp'
         if self.inNamespace:
             opts += 'n'
+        if self.privateMounts:
+            opts += 'z'
         # bash -m: enable job control
         # -s: pass $* to shell, and make process easy to find in ps
         cmd = [ 'mnexec', opts, 'bash', '-ms', 'mininet:' + self.name ]
@@ -294,7 +308,8 @@ class Node( object ):
            kwargs: Popen() keyword args"""
         defaults = { 'stdout': PIPE, 'stderr': PIPE,
                      'mncmd':
-                     [ 'mnexec', '-da', str( self.pid ) ] }
+                     [ 'mnexec', '-da', str( self.pid ),
+                      '-b', str( self.pid ) ] }
         defaults.update( kwargs )
         if len( args ) == 1:
             if type( args[ 0 ] ) is list:
@@ -1117,6 +1132,259 @@ class IVSSwitch(Switch):
         return self.cmd( 'ovs-ofctl ' + ' '.join( args ) +
                          ' tcp:127.0.0.1:%i' % self.listenPort )
 
+class NetworkBridge( Node ):
+    """A NetworkBridge is a Node that is provides a bridge between multiple
+       links connections (including external interfaces and internal links)
+       It is used by HostInterfaces and LegacySwitches
+
+       There's lots of potential for errors while performing these operations,
+       so we check the return codes of all operations performed to make
+       troubleshooting easier
+       """
+
+    def __init__( self, name, opts='', createBridge=True,
+                  controlBridgeState=True, **params):
+        """Init.
+           name: name for Network Bridge instance
+           createBridge: indiciates responsibility for bridge instantiation
+           controlBridgeState: indiciates responsibility for up/down of bridge"""
+        Node.__init__( self, name, createBridge=createBridge,
+                       controlBridgeState=controlBridgeState,
+                       inNamespace=False, **params )
+
+    def start( self ):
+        "Create a new bridge object at the host"
+        if self.params.get('createBridge') is True:
+            _, err, ret = self.pexec( 'brctl addbr br%d'
+                                  % (self.params['bridgeNum']) )
+            if ret != 0:
+                raise Exception( "Unable to create bridge %d\n"
+                                 "Error = %s"
+                                 % (self.params['bridgeNum'], err) )
+
+        "Attach any physical interface associated with this bridge"
+        if 'bridgeToPhys' in self.params:
+            _, err, ret = self.pexec( 'brctl addif br%d %s'
+                                  % (self.params['bridgeNum'],
+                                     self.params['bridgeToPhys']) )
+            if ret != 0:
+                raise Exception( "Unable to add physical interface to bridge %d\n"
+                                 "Error = %s"
+                                 % (self.params['bridgeNum'], err) )
+
+        "Attach all virtual interfaces associated to this bridge"
+        for interface in self.intfNames():
+            _, err, ret = self.pexec( 'brctl addif br%d %s'
+                                  % (self.params['bridgeNum'], interface ) )
+            if ret != 0:
+                raise Exception( "Unable to add interface to bridge %d\n"
+                                 "Error = %s"
+                                 % (self.params['bridgeNum'], err) )
+
+        if self.params.get('controlBridgeState') is True:
+            "Bring the bridge online"
+            _, err, ret = self.pexec( 'ifconfig br%d up'
+                                  % (self.params['bridgeNum']) )
+            if ret != 0:
+                raise Exception( "Unable to bring bridge %d online\n"
+                                 "Error = %s"
+                                 % (self.params['bridgeNum'], err) )
+
+    def stop( self ):
+        if self.params.get('controlBridgeState') is True:
+            "Push the bridge back offline"
+            _, err, ret = self.pexec( 'ifconfig br%d down'
+                                  % (self.params['bridgeNum']))
+            if ret != 0:
+                raise Exception( "Unable to bring bridge %d offline\n"
+                                 "Error = %s"
+                                 % (self.params['bridgeNum'], err) )
+
+        """All virtual interfaces associated to this bridge are removed
+           when the containers are torn-down, and thus we do remove them again
+           only as a formality (and expecting the removal to fail)"""
+        for interface in self.intfNames():
+            self.cmd( 'brctl delif br%d %s'
+                      % (self.params['bridgeNum'], interface ) )
+
+        "If we created the bridge, we'll go ahead and delete it too..."
+        if self.params.get('createBridge') is True:
+            "Delete the bridge object at the host"
+            _, err, ret = self.pexec( 'brctl delbr br%d'
+                                      % self.params['bridgeNum'])
+            if ret != 0:
+                raise Exception( "Unable to delete ethernet bridge %d\n"
+                                 "Error = %s"
+                                 % (self.params['bridgeNum'], err) )
+
+        "Stop the underlying node (which isn't really used...)"
+        self.terminate()
+
+#     TODO: SCHLINKER - Update this to print relevant information
+    def __repr__( self ):
+        "More informative string representation"
+        intfs = ( ','.join( [ '%s:%s' % ( i.name, i.IP() )
+                              for i in self.intfList() ] ) )
+        return '<%s %s: %s pid=%s> ' % (
+            self.__class__.__name__, self.name, intfs, self.pid )
+
+
+class LegacySwitch( NetworkBridge ):
+    """A LegacySwitch is a Node that is provides a bridge between multiple
+       links connections (including external interfaces and internal links)
+       It relies solely on functionity provided by NetworkBridge"""
+    def __init__( self, name, **params ):
+        """Init.
+           name: name for hostInterface instance"""
+        NetworkBridge.__init__( self, name, createBridge=True,
+                                controlBridgeState=True, **params )
+
+
+class HostInterface( NetworkBridge ):
+    """A HostInterface is a Node that is provides a bridge to a physical
+       ethernet connection (such as eth0, eth1, etc. on the host)
+       It relies solely on functionity provided by NetworkBridge"""
+    def __init__( self, name, createBridge=False,
+                  controlBridgeState=False, **params ):
+        """Init.
+           name: name for hostInterface instance
+           createBridge: indiciates responsibility for bridge instantiation"""
+        NetworkBridge.__init__( self, name, createBridge=createBridge,
+                                controlBridgeState=controlBridgeState, **params )
+
+class LegacyRouter( Node ):
+    """A LegacyRouter is a Node that is running (or has execed?)
+       a legacy routing engine (Quagga, BIRD, etc.)"""
+
+    def __init__( self, name, opts='', privateMounts=True, **params):
+        """Init.
+           name: name for legacyRouter instance
+           privateMounts: indiciates private mount namespace"""
+        Node.__init__( self, name, privateMounts=privateMounts, **params )
+
+#     TODO: SCHLINKER - Update this to print relevant information
+    def __repr__( self ):
+        "More informative string representation"
+        intfs = ( ','.join( [ '%s:%s' % ( i.name, i.IP() )
+                              for i in self.intfList() ] ) )
+        return '<%s %s: %s pid=%s> ' % (
+            self.__class__.__name__, self.name, intfs, self.pid )
+
+class QuaggaRouter( LegacyRouter ):
+    "Quagga Router Instance. Depends on quagga."
+
+    def __init__( self, name, **params ):
+        """Init.
+           name: name for quagga instance"""
+        LegacyRouter.__init__( self, name, **params )
+
+    @classmethod
+    def setup( cls ):
+        "Verify Quagga installation in global space"
+        serviceCheck( 'quagga', moduleName='Quagga (nongnu.org/quagga/)')
+
+    def start( self ):
+        "Start up a new Quagga router using Linux services"
+
+        "Bring up baseline network interfaces as required"
+        self.cmd( 'ifconfig lo up' )
+
+        """Setup mounts for Quagga config and runtime storage
+           based on passed parameters, check perms if requested"""
+        mounts = []
+        if "quaggaLogPath" in self.params:
+            mounts.append(MountProperties(pathToBind = "/var/log/quagga",
+                                          pathBindTo = self.params["quaggaLogPath"],
+                                          username = "quagga",
+                                          groupname = "quagga",
+                                          mode = 0755))
+
+        if "quaggaRunPath" in self.params:
+            mounts.append(MountProperties(pathToBind = "/run/quagga",
+                                          pathBindTo = self.params["quaggaRunPath"],
+                                          username = "quagga",
+                                          groupname = "quagga",
+                                          mode = 0755))
+
+        if "quaggaConfigPath" in self.params:
+            mounts.append(MountProperties(pathToBind = "/etc/quagga",
+                                          pathBindTo = self.params["quaggaConfigPath"],
+                                          username = "quagga",
+                                          groupname = "quaggavty",
+                                          mode = 0775))
+
+        checkAndBindDirectories(mounts, self)
+
+        "Start Quagga"
+        _, _, ret = self.pexec( '/etc/init.d/quagga start' )
+        if ret != 0:
+            raise Exception( "Error starting Quagga service" )
+
+    def stop( self ):
+        "Terminate Quagga Router."
+        self.cmd( '/etc/init.d/quagga stop' )
+
+        "Stop the underlying node"
+        self.terminate()
+
+class TransitPortalRouter( QuaggaRouter ):
+    "Transit Portal Router, a specific type of Quagga Router."
+
+    def __init__( self, name, **params ):
+        """Init.
+           name: name for Transit Portal instance"""
+        QuaggaRouter.__init__( self, name, **params )
+
+    @classmethod
+    def setup( cls ):
+        "Verify OpenVPN installation in global space"
+        serviceCheck( 'openvpn', moduleName='OpenVPN (openvpn.net)')
+
+        "Call underlying router's setup method"
+        QuaggaRouter.setup( )
+
+    def start( self ):
+        if "openVPNBasePath" in self.params:
+            """Create a secure temporary directory to store OpenVPN config data
+               Copy the existing OpenVPN directory into this new directory"""
+            self.openVPNTmpDir = tempfile.mkdtemp()
+            mounts = []
+            mounts.append(MountProperties(pathToBind = "/etc/openvpn",
+                                          pathBindTo = self.openVPNTmpDir,
+                                          username = "root",
+                                          groupname = "root",
+                                          mode = 0700))
+            checkAndBindDirectories(mounts, self)
+
+            openVPNBasePath = self.params["openVPNBasePath"]
+            copyTreeToExistingDir(openVPNBasePath, self.openVPNTmpDir)
+
+            if "openVPNSites" in self.params:
+                "Copy the site config files for requested sites"
+                openVPNSites = self.params["openVPNSites"]
+                for vpnSite in openVPNSites:
+                    configSrc = "%s/configs/%s.conf" % ( self.openVPNTmpDir,
+                                            vpnSite )
+                    shutil.copy( configSrc, self.openVPNTmpDir )
+
+        "Start OpenVPN"
+        _, _, ret = self.pexec( '/etc/init.d/openvpn start' )
+        if ret != 0:
+            raise Exception( "Error starting OpenVPN service" )
+
+        "Call underlying router start method"
+        QuaggaRouter.start( self )
+
+    def stop( self ):
+        "Stop OpenVPN"
+        self.cmd( '/etc/init.d/openvpn stop' )
+
+        "Destroy any OpenVPN temporary directory"
+        if hasattr(self,'openVPNTmpDir'):
+            deleteDirectoryIfExists(self.openVPNTmpDir)
+
+        "Call underlying router stop method"
+        QuaggaRouter.stop( self )
 
 class Controller( Node ):
     """A Controller is a Node that is running (or has execed?) an

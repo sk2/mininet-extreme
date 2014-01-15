@@ -9,7 +9,11 @@ from subprocess import call, check_call, Popen, PIPE, STDOUT
 import re
 from fcntl import fcntl, F_GETFL, F_SETFL
 from os import O_NONBLOCK
+from os.path import isdir
 import os
+import pwd
+import grp
+import shutil
 
 # Command execution support
 
@@ -121,14 +125,120 @@ def quietRun( cmd, **kwargs ):
 
 def isShellBuiltin( cmd ):
     "Return True if cmd is a bash builtin."
+    """SCHLINKER NOTE: Original version would return true if container name
+       was 'a' (or similar), as the letter 'a' exists within the output of
+       'bash -c enable'. Modified function below prevents this
+       at a minimal cost"""
     if isShellBuiltin.builtIns is None:
-        isShellBuiltin.builtIns = quietRun( 'bash -c enable' )
+        shellBuiltinRawStr = quietRun( 'bash -c enable' )
+        isShellBuiltin.builtIns = shellBuiltinRawStr.split('\n')
+        for i,shellBuiltin in enumerate(isShellBuiltin.builtIns):
+            isShellBuiltin.builtIns[i] = shellBuiltin.split(' ')[1:]
     space = cmd.find( ' ' )
     if space > 0:
         cmd = cmd[ :space]
     return cmd in isShellBuiltin.builtIns
 
 isShellBuiltin.builtIns = None
+
+def checkIsDir( path ):
+    "Raises exception if path is not valid directory"
+    if isdir(path) is False:
+        raise Exception( "Path [%s] does not exist" % ( path ) )
+
+def quietCheckIsDir( path ):
+    "Return if path is a valid directory"
+    return isdir(path)
+
+def bindDirectory ( pathToBind, pathBindTo, node ):
+    "Bind (mount -B) a directory to a path"
+    checkIsDir( pathBindTo )
+    checkIsDir( pathToBind )
+    _, err, ret = node.pexec( 'mount -B %s %s' % (pathBindTo, pathToBind) )
+    if ret != 0:
+        raise Exception( "Unable to bind directory %s to %s\n"
+                         "Error = %s"
+                         % (pathToBind, pathBindTo, err) )
+
+def checkAndBindDirectories ( mounts, node ):
+    "Create directories if needed, check permissions, then bind"
+    for mountPoint in mounts:
+        if node.params.get('createDirsIfNeeded') is True:
+            createDirectoryIfNeeded( mountPoint.pathBindTo,
+                                     mountPoint.username,
+                                     mountPoint.groupname,
+                                     mountPoint.mode )
+        if node.params.get('checkPerms') is True:
+            doPathPermsEqual( mountPoint.pathBindTo,
+                              mountPoint.username,
+                              mountPoint.groupname,
+                              mountPoint.mode )
+        bindDirectory(mountPoint.pathToBind, mountPoint.pathBindTo, node)
+
+def createDirectoryIfNeeded ( path, username, groupname, mode ):
+    "Create a directory with specified permissions if it does not already exist"
+    uid = pwd.getpwnam(username).pw_uid
+    gid = grp.getgrnam(groupname).gr_gid
+    return createDirectoryIfNeededID( path, uid, gid, mode )
+
+def createDirectoryIfNeededID ( path, uid, gid, mode ):
+    "Create a directory with specified permissions (IDs) if it does not already exist"
+    if not os.path.isdir( path ) and not os.path.exists( path ):
+        oldumask = os.umask( 0 )
+        os.mkdir( path, mode )
+        os.chown( path, uid, gid )
+        os.umask( oldumask ) # revert back to previous umask
+    elif not os.path.isdir( path ) and os.path.exists( path ):
+        raise Exception( "File exists in directory path %s" % (path) )
+
+def deleteDirectoryIfExists ( path ):
+    "Delete a directory if it exists (no error if it does not exist)"
+    if quietCheckIsDir( path ):
+        shutil.rmtree( path )
+
+def doPathPermsEqual ( pathToCheck, username=None, groupname=None, mode=None ):
+    "Check if a path's permissions are equal to the specified values"
+    uid = None
+    if username is not None:
+        try:
+            uid = pwd.getpwnam(username).pw_uid
+        except KeyError:
+            raise Exception( "Expected user %s does not exist" % (username) )
+    gid = None
+    if groupname is not None:
+        try:
+            gid = grp.getgrnam(groupname).gr_gid
+        except KeyError:
+            raise Exception( "Expected group %s does not exist" % (groupname) )
+
+    if doPathPermsEqualID( pathToCheck, uid, gid, mode ) is False:
+        raise Exception( "Insufficient or unexpected permissions for %s\n"
+                         "Expected user = %s, group = %s, (minimum) mode = %s"
+                         % (pathToCheck, username, groupname, oct(mode) ) )
+
+
+def doPathPermsEqualID ( pathToCheck, uid=None, gid=None, mode=None ):
+    "Check if a path's permissions are equal to the specified values (with IDs)"
+    permsEqual = True
+    pathStat = os.stat( pathToCheck )
+    if uid is not None:
+        permsEqual &= (pathStat.st_uid == uid)
+    if gid is not None:
+        permsEqual &= (pathStat.st_gid == gid)
+    if mode is not None:
+        permsEqual &= (((pathStat.st_mode & 0o777) ^ mode) & mode) == 0
+
+    return permsEqual
+
+def copyTreeToExistingDir(src, dst, symlinks=False, ignore=None):
+    "Copy the contents of one directory into another (existing) directory"
+    for item in os.listdir(src):
+        s = os.path.join(src, item)
+        d = os.path.join(dst, item)
+        if os.path.isdir(s):
+            shutil.copytree(s, d, symlinks, ignore)
+        else:
+            shutil.copy2(s, d)
 
 # pylint: enable-msg=E1101
 
