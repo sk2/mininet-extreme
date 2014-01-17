@@ -168,11 +168,26 @@ def checkAndBindDirectories ( mounts, node ):
                                      mountPoint.username,
                                      mountPoint.groupname,
                                      mountPoint.mode )
+        if node.params.get('fixPerms') is True:
+            setPathPermsTo( mountPoint.pathBindTo,
+                            mountPoint.username,
+                            mountPoint.groupname,
+                            mountPoint.mode,
+                            mountPoint.allowGreaterMode,
+                            recursive=True )
         if node.params.get('checkPerms') is True:
-            doPathPermsEqual( mountPoint.pathBindTo,
-                              mountPoint.username,
-                              mountPoint.groupname,
-                              mountPoint.mode )
+            permsEqual = doPathPermsEqual( mountPoint.pathBindTo,
+                                           mountPoint.username,
+                                           mountPoint.groupname,
+                                           mountPoint.mode,
+                                           mountPoint.allowGreaterMode,
+                                           recursive=True )
+            if permsEqual is False:
+                raise Exception( "Insufficient or unexpected permissions for %s"
+                                 "or a subdirectory / file\n"
+                                 "Expected user = %s, group = %s, (minimum) mode = %s"
+                                 % (mountPoint.pathBindTo, mountPoint.username,
+                                    mountPoint.groupname, oct(mountPoint.mode) ) )
         bindDirectory(mountPoint.pathToBind, mountPoint.pathBindTo, node)
 
 def createDirectoryIfNeeded ( path, username, groupname, mode ):
@@ -196,8 +211,7 @@ def deleteDirectoryIfExists ( path ):
     if quietCheckIsDir( path ):
         shutil.rmtree( path )
 
-def doPathPermsEqual ( pathToCheck, username=None, groupname=None, mode=None ):
-    "Check if a path's permissions are equal to the specified values"
+def getUIDGID ( username=None, groupname=None ):
     uid = None
     if username is not None:
         try:
@@ -210,25 +224,101 @@ def doPathPermsEqual ( pathToCheck, username=None, groupname=None, mode=None ):
             gid = grp.getgrnam(groupname).gr_gid
         except KeyError:
             raise Exception( "Expected group %s does not exist" % (groupname) )
+    return uid, gid
 
-    if doPathPermsEqualID( pathToCheck, uid, gid, mode ) is False:
-        raise Exception( "Insufficient or unexpected permissions for %s\n"
-                         "Expected user = %s, group = %s, (minimum) mode = %s"
-                         % (pathToCheck, username, groupname, oct(mode) ) )
+def doPathPermsEqual ( pathToCheck, username=None, groupname=None,
+                            mode=None, allowGreaterMode=False,
+                            recursive=False ):
+    "Check if a path's permissions are equal to the specified values"
+    uid, gid = getUIDGID( username, groupname )
+    return doPathPermsEqualID( pathToCheck, uid, gid,
+                               mode, allowGreaterMode,
+                               recursive )
 
-
-def doPathPermsEqualID ( pathToCheck, uid=None, gid=None, mode=None ):
+def doPathPermsEqualID ( pathToCheck, uid=None, gid=None,
+                         mode=None, allowGreaterMode=False,
+                         recursive=False ):
     "Check if a path's permissions are equal to the specified values (with IDs)"
-    permsEqual = True
-    pathStat = os.stat( pathToCheck )
-    if uid is not None:
-        permsEqual &= (pathStat.st_uid == uid)
-    if gid is not None:
-        permsEqual &= (pathStat.st_gid == gid)
-    if mode is not None:
-        permsEqual &= (((pathStat.st_mode & 0o777) ^ mode) & mode) == 0
 
+    "Parent directory first..."
+    if doObjectPermsEqualID( pathToCheck, uid, gid, mode, allowGreaterMode ) is False:
+        return False
+
+    "Then recursively check subdirectories..."
+    if recursive is True:
+        for root, dirs, files in os.walk( pathToCheck ):
+            for momo in dirs:
+                if doObjectPermsEqualID( os.path.join(root, momo), uid, gid,
+                                         mode, allowGreaterMode ) is False:
+                    return False;
+            for momo in files:
+                if doObjectPermsEqualID( os.path.join(root, momo), uid, gid,
+                                         mode, allowGreaterMode ) is False:
+                    return False;
+    return True;
+
+def doObjectPermsEqualID ( objectToCheck, uid=None, gid=None,
+                         mode=None, allowGreaterMode=False ):
+    "Check if an objects permissions are equal to the specified values (with IDs)"
+    permsEqual = True
+    objectStat = os.stat( objectToCheck )
+    if uid is not None:
+        permsEqual &= (objectStat.st_uid == uid)
+    if gid is not None:
+        permsEqual &= (objectStat.st_gid == gid)
+    if mode is not None:
+        if allowGreaterMode is False:
+            permsEqual &= (((objectStat.st_mode & 0o777) ^ mode) & mode) == 0
+        else:
+            permsEqual &= (objectStat.st_mode & 0o777) == mode
     return permsEqual
+
+def setPathPermsTo ( pathToUpdate, username=None, groupname=None,
+                     mode=None, allowGreaterMode=False,
+                     recursive=False ):
+    "Set a path's permissions to the specified values"
+    uid, gid = getUIDGID( username, groupname )
+    return setPathPermsToID( pathToUpdate, uid, gid,
+                             mode, allowGreaterMode,
+                             recursive )
+
+def setPathPermsToID ( pathToUpdate, uid=None, gid=None,
+                       mode=None, allowGreaterMode=False,
+                       recursive=False ):
+    "Set a path's permissions to the specified values (with IDs)"
+
+    "Parent directory first..."
+    setObjectPermsToID( pathToUpdate, uid, gid, mode, allowGreaterMode )
+
+    "Then recursively check subdirectories..."
+    if recursive is True:
+        for root, dirs, files in os.walk( pathToUpdate ):
+            for momo in dirs:
+                setObjectPermsToID( os.path.join(root, momo), uid, gid,
+                                    mode, allowGreaterMode )
+            for momo in files:
+                setObjectPermsToID( os.path.join(root, momo), uid, gid,
+                                    mode, allowGreaterMode )
+
+def setObjectPermsToID ( objectToUpdate, uid=None, gid=None,
+                       mode=None, allowGreaterMode=False ):
+    "Set an objects's permissions to the specified values (with IDs)"
+    if uid is None and gid is None:
+        pass
+    elif uid is None:
+        os.chown( objectToUpdate, -1, gid )
+    elif gid is None:
+        os.chown( objectToUpdate, uid, -1 )
+
+    "Update the mode if needed"
+    if mode is not None:
+        objectStat = os.stat( objectToUpdate )
+        if allowGreaterMode is False:
+            modeOK = (((objectStat.st_mode & 0o777) ^ mode) & mode) == 0
+        else:
+            modeOK = (objectStat.st_mode & 0o777) == mode
+        if modeOK is False:
+            os.chmod( objectToUpdate, mode )
 
 def copyTreeToExistingDir(src, dst, symlinks=False, ignore=None):
     "Copy the contents of one directory into another (existing) directory"

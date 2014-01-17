@@ -65,7 +65,7 @@ from mininet.link import Link, Intf, TCIntf
 
 "Structure containing namespace mounts and required permissions per mount"
 MountProperties = namedtuple("MountProperties",
-                             "pathToBind pathBindTo username groupname mode")
+                             "pathToBind pathBindTo username groupname mode allowGreaterMode")
 
 class Node( object ):
     """A virtual network node is simply a shell in a network namespace.
@@ -1155,7 +1155,7 @@ class NetworkBridge( Node ):
     def start( self ):
         "Create a new bridge object at the host"
         if self.params.get('createBridge') is True:
-            _, err, ret = self.pexec( 'brctl addbr br%d'
+            _, err, ret = self.pexec( 'brctl addbr mn-br%d'
                                   % (self.params['bridgeNum']) )
             if ret != 0:
                 raise Exception( "Unable to create bridge %d\n"
@@ -1164,7 +1164,7 @@ class NetworkBridge( Node ):
 
         "Attach any physical interface associated with this bridge"
         if 'bridgeToPhys' in self.params:
-            _, err, ret = self.pexec( 'brctl addif br%d %s'
+            _, err, ret = self.pexec( 'brctl addif mn-br%d %s'
                                   % (self.params['bridgeNum'],
                                      self.params['bridgeToPhys']) )
             if ret != 0:
@@ -1174,7 +1174,7 @@ class NetworkBridge( Node ):
 
         "Attach all virtual interfaces associated to this bridge"
         for interface in self.intfNames():
-            _, err, ret = self.pexec( 'brctl addif br%d %s'
+            _, err, ret = self.pexec( 'brctl addif mn-br%d %s'
                                   % (self.params['bridgeNum'], interface ) )
             if ret != 0:
                 raise Exception( "Unable to add interface to bridge %d\n"
@@ -1183,7 +1183,7 @@ class NetworkBridge( Node ):
 
         if self.params.get('controlBridgeState') is True:
             "Bring the bridge online"
-            _, err, ret = self.pexec( 'ifconfig br%d up'
+            _, err, ret = self.pexec( 'ifconfig mn-br%d up'
                                   % (self.params['bridgeNum']) )
             if ret != 0:
                 raise Exception( "Unable to bring bridge %d online\n"
@@ -1193,7 +1193,7 @@ class NetworkBridge( Node ):
     def stop( self ):
         if self.params.get('controlBridgeState') is True:
             "Push the bridge back offline"
-            _, err, ret = self.pexec( 'ifconfig br%d down'
+            _, err, ret = self.pexec( 'ifconfig mn-br%d down'
                                   % (self.params['bridgeNum']))
             if ret != 0:
                 raise Exception( "Unable to bring bridge %d offline\n"
@@ -1204,13 +1204,13 @@ class NetworkBridge( Node ):
            when the containers are torn-down, and thus we do remove them again
            only as a formality (and expecting the removal to fail)"""
         for interface in self.intfNames():
-            self.cmd( 'brctl delif br%d %s'
+            self.cmd( 'brctl delif mn-br%d %s'
                       % (self.params['bridgeNum'], interface ) )
 
         "If we created the bridge, we'll go ahead and delete it too..."
         if self.params.get('createBridge') is True:
             "Delete the bridge object at the host"
-            _, err, ret = self.pexec( 'brctl delbr br%d'
+            _, err, ret = self.pexec( 'brctl delbr mn-br%d'
                                       % self.params['bridgeNum'])
             if ret != 0:
                 raise Exception( "Unable to delete ethernet bridge %d\n"
@@ -1297,32 +1297,38 @@ class QuaggaRouter( LegacyRouter ):
                                           pathBindTo = self.params["quaggaLogPath"],
                                           username = "quagga",
                                           groupname = "quagga",
-                                          mode = 0755))
+                                          mode = 0755,
+                                          allowGreaterMode = True))
 
         if "quaggaRunPath" in self.params:
             mounts.append(MountProperties(pathToBind = "/run/quagga",
                                           pathBindTo = self.params["quaggaRunPath"],
                                           username = "quagga",
                                           groupname = "quagga",
-                                          mode = 0755))
+                                          mode = 0755,
+                                          allowGreaterMode = True))
 
         if "quaggaConfigPath" in self.params:
             mounts.append(MountProperties(pathToBind = "/etc/quagga",
                                           pathBindTo = self.params["quaggaConfigPath"],
                                           username = "quagga",
                                           groupname = "quaggavty",
-                                          mode = 0775))
+                                          mode = 0775,
+                                          allowGreaterMode = True))
 
         checkAndBindDirectories(mounts, self)
 
         "Start Quagga"
-        _, _, ret = self.pexec( '/etc/init.d/quagga start' )
-        if ret != 0:
-            raise Exception( "Error starting Quagga service" )
+        if self.params.get('manageServices') is True:
+            _, err, ret = self.pexec( '/etc/init.d/quagga start' )
+            if ret != 0:
+                raise Exception( "Error starting Quagga service\n"
+                                 "Error = %s" % (err) )
 
     def stop( self ):
         "Terminate Quagga Router."
-        self.cmd( '/etc/init.d/quagga stop' )
+        if self.params.get('manageServices') is True:
+            self.cmd( '/etc/init.d/quagga stop' )
 
         "Stop the underlying node"
         self.terminate()
