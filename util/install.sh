@@ -153,16 +153,33 @@ function mn_deps {
     if [ "$DIST" = "Fedora" ]; then
         $install gcc make socat psmisc xterm openssh-clients iperf \
             iproute telnet python-setuptools libcgroup-tools \
-            ethtool help2man pyflakes pylint python-pep8 bridge-utils openvpn
+            ethtool help2man pyflakes pylint python-pep8
     else
         $install gcc make socat psmisc xterm ssh iperf iproute telnet \
             python-setuptools cgroup-bin ethtool help2man \
-            pyflakes pylint pep8 bridge-utils openvpn
+            pyflakes pylint pep8
     fi
+}
 
+# Install Mininet Extreme deps
+function mn_extreme_deps {
+    echo "Installing Mininet Extreme dependencies"
+    $install quagga bridge-utils openvpn
+}
+
+# Install Mininet core
+function mn_install {
     echo "Installing Mininet core"
     pushd $MININET_DIR
     sudo make install
+    popd
+}
+
+# Install Mininet core (w/ develop)
+function mn_develop {
+    echo "Installing Mininet core (w/ develop)"
+    pushd $MININET_DIR
+    sudo make develop
     popd
 }
 
@@ -715,7 +732,7 @@ function vm_clean {
 }
 
 function usage {
-    printf '\nUsage: %s [-abcdfhikmnprtvwx03]\n\n' $(basename $0) >&2
+    printf '\nUsage: %s [-abcdfhikmnopqrstvwxz03]\n\n' $(basename $0) >&2
 
     printf 'This install script attempts to install useful packages\n' >&2
     printf 'for Mininet. It should (hopefully) work on Ubuntu 11.10+\n' >&2
@@ -735,6 +752,7 @@ function usage {
     printf -- ' -k: install new (K)ernel\n' >&2
     printf -- ' -m: install Open vSwitch kernel (M)odule from source dir\n' >&2
     printf -- ' -n: install Mini(N)et dependencies + core files\n' >&2
+    printf -- ' -o: devel(O)per install of MiniNet dependencies + core files\n' >&2
     printf -- ' -p: install (P)OX OpenFlow Controller\n' >&2
     printf -- ' -q: patch (Q)uagga init.d file\n' >&2
     printf -- ' -r: remove existing Open vSwitch packages\n' >&2
@@ -743,6 +761,7 @@ function usage {
     printf -- ' -v: install Open (V)switch\n' >&2
     printf -- ' -w: install OpenFlow (W)ireshark dissector\n' >&2
     printf -- ' -x: install NO(X) Classic OpenFlow controller\n' >&2
+    printf -- ' -z: install Mininet Extreme(Z) dependencies\n' >&2
     printf -- ' -0: (default) -0[fx] installs OpenFlow 1.0 versions\n' >&2
     printf -- ' -3: -3[fx] installs OpenFlow 1.3 versions\n' >&2
     exit 2
@@ -754,7 +773,7 @@ if [ $# -eq 0 ]
 then
     all
 else
-    while getopts 'abcdefhikmnpqrs:tvwx03' OPTION
+    while getopts 'abcdefhikmnopqrs:tvwxz03' OPTION
     do
       case $OPTION in
       a)    all;;
@@ -771,7 +790,12 @@ else
       i)    ivs;;
       k)    kernel;;
       m)    modprobe;;
-      n)    mn_deps;;
+      n)    mn_deps
+            mn_install
+            ;;
+      o)    mn_deps
+            mn_develop
+            ;;
       p)    pox;;
       q)    patch_quagga_initd;;
       r)    remove_ovs;;
@@ -786,6 +810,7 @@ else
             1.3) nox13;;
             *)  echo "Invalid OpenFlow version $OF_VERSION";;
             esac;;
+      z)    mn_extreme_deps;;
       0)    OF_VERSION=1.0;;
       3)    OF_VERSION=1.3;;
       ?)    usage;;
