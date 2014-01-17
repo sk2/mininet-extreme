@@ -89,6 +89,11 @@ This example monitors a number of hosts using `host.popen()` and
 This example demonstrates monitoring output from multiple hosts using
 the `node.popen()` interface (which returns `Popen` objects) and `pmonitor()`.
 
+#### quagga.py:
+
+This example demonstrates how to execute multiple instances of Quagga
+colocated on a single machine within Mininet containers
+
 #### scratchnet.py, scratchnetuser.py:
 
 These two examples demonstrate how to create a network by using the lowest-
