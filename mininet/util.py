@@ -183,7 +183,7 @@ def checkAndBindDirectories ( mounts, node ):
                                            mountPoint.allowGreaterMode,
                                            recursive=True )
             if permsEqual is False:
-                raise Exception( "Insufficient or unexpected permissions for %s"
+                raise Exception( "Insufficient or unexpected permissions for %s "
                                  "or a subdirectory / file\n"
                                  "Expected user = %s, group = %s, (minimum) mode = %s"
                                  % (mountPoint.pathBindTo, mountPoint.username,
