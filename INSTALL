@@ -21,7 +21,7 @@ Mininet Extreme Installation/Configuration Notes
   PID files within `/run/quagga-NAME`. This directories will be automatically created and
   permissions will be automatically configured
 
-      `sudo python mininet-extreme/quagga.py`
+      `sudo python mininet-extreme/examples/quagga.py`
       
   It is recommended that you do not attempt to access the `bgpd` console directly from
   the Mininet shell, as there are some incompatibilities. Instead, use the following to
