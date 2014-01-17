@@ -1,5 +1,7 @@
-Mininet Extreme: An Enhanced Version of Mininet
+Mininet Extreme: 
 ========================================================
+
+*Extreme emulation power for the most complex networks*
 
 ### What is Mininet Extreme?
 
