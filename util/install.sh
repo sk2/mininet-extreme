@@ -10,7 +10,7 @@ set -e
 set -o nounset
 
 # Get directory containing mininet folder
-MININET_DIR="$( cd -P "$( dirname "${BASH_SOURCE[0]}" )/../.." && pwd -P )"
+MININET_DIR="$( cd -P "$( dirname "${BASH_SOURCE[0]}" )/.." && pwd -P )"
 
 # Set up build directory, which by default is the working directory
 #  unless the working directory is a subdirectory of mininet, 
@@ -161,7 +161,7 @@ function mn_deps {
     fi
 
     echo "Installing Mininet core"
-    pushd $MININET_DIR/mininet
+    pushd $MININET_DIR
     sudo make install
     popd
 }
@@ -190,7 +190,7 @@ function of {
     cd $BUILD_DIR/openflow
 
     # Patch controller to handle more than 16 switches
-    patch -p1 < $MININET_DIR/mininet/util/openflow-patches/controller.patch
+    patch -p1 < $MININET_DIR/util/openflow-patches/controller.patch
 
     # Resume the install:
     ./boot.sh
@@ -296,7 +296,7 @@ function wireshark {
 
     # Copy coloring rules: OF is white-on-blue:
     mkdir -p $HOME/.wireshark
-    cp $MININET_DIR/mininet/util/colorfilters $HOME/.wireshark
+    cp $MININET_DIR/util/colorfilters $HOME/.wireshark
 }
 
 
@@ -471,9 +471,9 @@ function nox {
 
     # Apply patches
     git checkout -b tutorial-destiny
-    git am $MININET_DIR/mininet/util/nox-patches/*tutorial-port-nox-destiny*.patch
+    git am $MININET_DIR/util/nox-patches/*tutorial-port-nox-destiny*.patch
     if [ "$DIST" = "Ubuntu" ] && [ `expr $RELEASE '>=' 12.04` = 1 ]; then
-        git am $MININET_DIR/mininet/util/nox-patches/*nox-ubuntu12-hacks.patch
+        git am $MININET_DIR/util/nox-patches/*nox-ubuntu12-hacks.patch
     fi
 
     # Build
@@ -531,6 +531,15 @@ function pox {
     echo "Installing POX into $BUILD_DIR/pox..."
     cd $BUILD_DIR
     git clone https://github.com/noxrepo/pox.git
+}
+
+# Patch Quagga init.d
+function patch_quagga_initd {
+    echo "Patching /etc/init.d/quagga"
+    cd /etc/init.d/
+
+    # Patch Quagga's init.d file to use a PID file when stopping
+    patch < $MININET_DIR/util/linux-patches/quagga.initd.patch
 }
 
 # Install OFtest
@@ -727,6 +736,7 @@ function usage {
     printf -- ' -m: install Open vSwitch kernel (M)odule from source dir\n' >&2
     printf -- ' -n: install Mini(N)et dependencies + core files\n' >&2
     printf -- ' -p: install (P)OX OpenFlow Controller\n' >&2
+    printf -- ' -q: patch (Q)uagga init.d file\n' >&2
     printf -- ' -r: remove existing Open vSwitch packages\n' >&2
     printf -- ' -s <dir>: place dependency (S)ource/build trees in <dir>\n' >&2
     printf -- ' -t: complete o(T)her Mininet VM setup tasks\n' >&2
@@ -744,7 +754,7 @@ if [ $# -eq 0 ]
 then
     all
 else
-    while getopts 'abcdefhikmnprs:tvwx03' OPTION
+    while getopts 'abcdefhikmnpqrs:tvwx03' OPTION
     do
       case $OPTION in
       a)    all;;
@@ -763,6 +773,7 @@ else
       m)    modprobe;;
       n)    mn_deps;;
       p)    pox;;
+      q)    patch_quagga_initd;;
       r)    remove_ovs;;
       s)    mkdir -p $OPTARG; # ensure the directory is created
             BUILD_DIR="$( cd -P "$OPTARG" && pwd )"; # get the full path

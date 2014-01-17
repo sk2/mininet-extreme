@@ -1,0 +1,14 @@
+--- quagga_old	2014-01-14 18:04:12.200017755 -0800
++++ quagga	2014-01-14 18:06:09.100014948 -0800
+@@ -94,7 +94,10 @@
+     else
+ 	PIDFILE=`pidfile $1`
+ 	PID=`cat $PIDFILE 2>/dev/null`
+-	start-stop-daemon --stop --quiet --oknodo --exec "$D_PATH/$1"
++	start-stop-daemon \
++		--stop --quiet --oknodo \
++                --pidfile=`pidfile $1` \
++		--exec "$D_PATH/$1"
+ 	#
+ 	#       Now we have to wait until $DAEMON has _really_ stopped.
+ 	#
