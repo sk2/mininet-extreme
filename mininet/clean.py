@@ -64,4 +64,11 @@ def cleanup():
         if link != '':
             sh( "ip link del " + link )
 
+    info( "*** Removing all links of the pattern mn-brX\n" )
+    bridges = sh( r"sudo brctl show | egrep -o '(mn+-br\w+)'" ).split( '\n' )
+    for bridge in bridges:
+        if bridge != '':
+            sh( "ifconfig " + bridge  + " down")
+            sh( "brctl delbr " + bridge )
+
     info( "*** Cleanup complete.\n" )
