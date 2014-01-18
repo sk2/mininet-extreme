@@ -70,6 +70,12 @@ def startNetwork():
     info( '** Testing network connectivity\n' )
     net.ping(net.legacyRouters)
 
+    info( '** Collecting BGP neighbors\n' )
+    for router in net.legacyRouters:
+        quagga_cmd = "show ip bgp summary"
+        result = router.cmd('vtysh -c \"%s\"' % quagga_cmd)
+        info("*** %s:\n%s" % (router, result))
+
     info( '** Running CLI\n' )
     CLI( net )
 
